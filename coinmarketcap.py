@@ -12,10 +12,11 @@ import logging
 import numpy
 import sys
 import os
-from cognite.config import configure_session
-from cognite.v05 import timeseries
-from cognite.v05 import assets
-from cognite import _utils
+from cognite.client import CogniteClient
+from cognite.client.exceptions import CogniteAPIError
+from cognite.client.data_classes import TimeSeries
+from cognite.client.data_classes import TimeSeriesUpdate
+from cognite.client.data_classes import Asset
 
 def save_cmc_to_file(data, fn):
     with open(fn, 'w') as outfile:
@@ -36,42 +37,55 @@ def download_cmc(apiKey):
 		logging.error('Failed to get from coinmarketcap')
 	return data
 
-def create_assets_and_timeseries(data, root):
-	for cryptocurrency in data['data']:
-		asset = assets.Asset(name=cryptocurrency['symbol'],
-			parent_id=root,
-			description=cryptocurrency['name'])
-		assetList = [asset]
-		response = assets.post_assets(assetList)
-		tsPrice = timeseries.TimeSeries(name=cryptocurrency['symbol']+'/price/USD', unit='USD', asset_id=response.to_json()[0]['id'],description=cryptocurrency['name']+' price')
-		tsVol = timeseries.TimeSeries(name=cryptocurrency['symbol']+'/vol/24h/USD', unit='USD', asset_id=response.to_json()[0]['id'],description=cryptocurrency['name']+' volume last 24h')
-		tsCap = timeseries.TimeSeries(name=cryptocurrency['symbol']+'/cap/USD', unit='USD', asset_id=response.to_json()[0]['id'],description=cryptocurrency['name']+' market cap')
-		tsList = [tsPrice, tsVol, tsCap]
-		res2 = timeseries.post_time_series(tsList)
+def create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client):
+	res = []
+	try:
+		res = client.assets.retrieve(external_id=asset_ext_id)
+	except CogniteAPIError as e:
+		if e.code == 400:
+			asset = Asset(external_id=asset_ext_id, name=symbol, parent_id=root, description=name)
+			res = client.assets.create(asset)
+	print(res)
+	ts = client.time_series.create(TimeSeries(external_id=ext_id, name=name, unit='USD', asset_id=res.id))
+	return ts
 
-def update_datapoints(data):
+def update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client):
+	try:
+		update = TimeSeriesUpdate(external_id=old_name).external_id.set(ext_id).name.set(name)
+		ts = client.time_series.update(update)
+	except CogniteAPIError as e:
+		if e.code == 400:
+			return create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client)
+
+def get_update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client):
+	try:
+		ts = client.time_series.retrieve(external_id=[ext_id])
+		return ts
+	except CogniteAPIError as e:
+		if e.code == 400:
+			return update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client)
+		logging.error('Unknown error while retrieving ts')
+
+def update_datapoints(data, root, client):
 	tsPointList = []
+	num = 0
 	for cryptocurrency in data['data']:
+		num = num + 1
 		print(cryptocurrency['quote']['USD']['last_updated'])
 		lastUpdated = int(numpy.datetime64(cryptocurrency['quote']['USD']['last_updated']).view('<i8'))
 		print(lastUpdated)
 		price = cryptocurrency['quote']['USD']['price']
 		vol = cryptocurrency['quote']['USD']['volume_24h']
 		cap = cryptocurrency['quote']['USD']['market_cap']
-		tsPointList.append(timeseries.TimeseriesWithDatapoints(name=cryptocurrency['symbol']+'/price/USD',datapoints=[timeseries.Datapoint(timestamp=lastUpdated, value=price)]))
-		tsPointList.append(timeseries.TimeseriesWithDatapoints(name=cryptocurrency['symbol']+'/vol/24h/USD',datapoints=[timeseries.Datapoint(timestamp=lastUpdated, value=vol)]))
-		tsPointList.append(timeseries.TimeseriesWithDatapoints(name=cryptocurrency['symbol']+'/cap/USD',datapoints=[timeseries.Datapoint(timestamp=lastUpdated, value=cap)]))
-		if len(tsPointList) > 500:
-			try:
-				timeseries.post_multi_tag_datapoints(tsPointList)
-			except _utils.APIError as err:
-				logging.info(err)
-			tsPointList = []
+		ts = get_update_or_create_ts(cryptocurrency['symbol']+'/price/USD', 'coinmarketcapid:'+str(cryptocurrency['id'])+'/price/USD', cryptocurrency['name']+' price', cryptocurrency['symbol'], 'coinmarketcapid:'+str(cryptocurrency['id']), root, client)
+		ts = get_update_or_create_ts(cryptocurrency['symbol']+'/vol/24h/USD', 'coinmarketcapid:'+str(cryptocurrency['id'])+'/vol/24h/USD', cryptocurrency['name']+' volume', cryptocurrency['symbol'], 'coinmarketcapid:'+str(cryptocurrency['id']), root, client)
+		ts = get_update_or_create_ts(cryptocurrency['symbol']+'/cap/USD', 'coinmarketcapid:'+str(cryptocurrency['id'])+'/cap/USD', cryptocurrency['name']+' market cap', cryptocurrency['symbol'], 'coinmarketcapid:'+str(cryptocurrency['id']), root, client)
+
+		tsPointList.append({"externalId": 'coinmarketcapid:'+str(cryptocurrency['id'])+'/price/USD', "datapoints": [(lastUpdated, price)]})
+		tsPointList.append({"externalId": 'coinmarketcapid:'+str(cryptocurrency['id'])+'/vol/24h/USD', "datapoints": [(lastUpdated, vol)]})
+		tsPointList.append({"externalId": 'coinmarketcapid:'+str(cryptocurrency['id'])+'/cap/USD', "datapoints": [(lastUpdated, cap)]})
 	if len(tsPointList) > 0:
-		try:
-			timeseries.post_multi_tag_datapoints(tsPointList)
-		except _utils.APIError as err:
-			logging.info(err)
+		client.datapoints.insert_multiple(tsPointList)
 
 if __name__ == "__main__":
     logging.basicConfig(filename='coinmarketcap.log',level=logging.INFO)
@@ -81,18 +95,16 @@ if __name__ == "__main__":
     parser.add_argument(
         '-k', '--key', type=str, required=True, help='Cognite API key. Required.')
     parser.add_argument(
-        '-b', '--bitcoin_key', type=str, required=True, help='Bitcoin API key. Required.')
+		'-p', '--project', type=str, required=True, help='CDF project to authenticate towards')
     parser.add_argument(
-        '-p', '--project', type=str, required=True, help='Project name/id. Required.')
+		'-b', '--bitcoin_key', type=str, required=True, help='Bitcoin API key. Required.')
     parser.add_argument(
-        '-f', '--file', type=str, help='File data from last load.')
+		'-f', '--file', type=str, help='File data from last load.')
     parser.add_argument(
-    	'-a', '--asset', type=str, required=True, help='Add assets under this root asset.')
-    parser.add_argument(
-    	'-c', '--create', type=bool, help='Create assets and time series. First run only.')
+		'-a', '--asset', type=str, required=True, help='Add assets under this root asset.')
     
     args = parser.parse_args()
-    configure_session(args.key, args.project)
+    client = CogniteClient(api_key=args.key, project=args.project)
 
     data = []
     if args.file:
@@ -101,7 +113,4 @@ if __name__ == "__main__":
     	data = download_cmc(args.bitcoin_key)
     	save_cmc_to_file(data, 'coinmarketcap.last.json')
 
-    if args.create:
-    	create_assets_and_timeseries(data, args.asset)
-
-    update_datapoints(data)
+    update_datapoints(data, int(args.asset), client)
