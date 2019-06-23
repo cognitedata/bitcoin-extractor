@@ -42,7 +42,7 @@ def create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client
 	try:
 		res = client.assets.retrieve(external_id=asset_ext_id)
 	except CogniteAPIError as e:
-		if e.code == 400:
+		if e.code == 422:
 			asset = Asset(external_id=asset_ext_id, name=symbol, parent_id=root, description=name)
 			res = client.assets.create(asset)
 	print(res)
