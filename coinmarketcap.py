@@ -12,6 +12,7 @@ import logging
 import numpy
 import sys
 import os
+import time
 from cognite.client import CogniteClient
 from cognite.client.exceptions import CogniteAPIError
 from cognite.client.data_classes import TimeSeries
@@ -42,11 +43,11 @@ def create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client
 	try:
 		res = client.assets.retrieve(external_id=asset_ext_id)
 	except CogniteAPIError as e:
-		if e.code == 422:
+		if e.code == 400:
 			asset = Asset(external_id=asset_ext_id, name=symbol, parent_id=root, description=name)
 			res = client.assets.create(asset)
 	print(res)
-	ts = client.time_series.create(TimeSeries(external_id=ext_id, name=name, unit='USD', asset_id=res.id))
+	ts = client.time_series.create(TimeSeries(external_id=ext_id, name=name, unit='USD', asset_id=res.id, legacy_name=ext_id))
 	return ts
 
 def update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client):
@@ -59,7 +60,8 @@ def update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, clie
 
 def get_update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client):
 	try:
-		ts = client.time_series.retrieve(external_id=[ext_id])
+		print(ext_id)
+		ts = client.time_series.retrieve(external_id=ext_id)
 		return ts
 	except CogniteAPIError as e:
 		if e.code == 400:
@@ -87,6 +89,29 @@ def update_datapoints(data, root, client):
 	if len(tsPointList) > 0:
 		client.datapoints.insert_multiple(tsPointList)
 
+def do_cmc_backfill(apiKey, ids, start, end, client):
+	idList = ids.split(',')
+	tsPointList = []
+	for id in idList:
+		curr_time = start
+		data_points = []
+		while curr_time < end:
+			url = "https://pro-api.coinmarketcap.com/v1/tools/price-conversion?id=" + id + "&amount=1&convert=USD&time=" + str(curr_time)
+			try:
+				r = requests.get(url = url, headers = {'X-CMC_PRO_API_KEY': apiKey })
+				data = r.json()
+				logging.info(data)
+				cryptocurrency = data['data']
+				lastUpdated = int(numpy.datetime64(cryptocurrency['quote']['USD']['last_updated']).view('<i8'))
+				price = cryptocurrency['quote']['USD']['price']
+				data_points.append((lastUpdated, price))
+				curr_time += 300
+			except:
+				logging.error('Failed to get from coinmarketcap, time ', curr_time, ' id ', id)
+			time.sleep(2)
+		tsPointList.append({"externalId": 'coinmarketcapid:'+id+'/price/USD', "datapoints": data_points})
+	client.datapoints.insert_multiple(tsPointList)
+
 if __name__ == "__main__":
     logging.basicConfig(filename='coinmarketcap.log',level=logging.INFO)
     
@@ -102,15 +127,24 @@ if __name__ == "__main__":
 		'-f', '--file', type=str, help='File data from last load.')
     parser.add_argument(
 		'-a', '--asset', type=str, required=True, help='Add assets under this root asset.')
+    parser.add_argument(
+    	'-i', '--ids', type=str, help='If set, historical backfill of this comma-separated list of cryptocurrency IDs.')
+    parser.add_argument(
+    	'-s', '--start', type=str, help='Start timestamp of historical backfill.')
+    parser.add_argument(
+    	'-e', '--end', type=str, help='End timestamp of historical backfill.')
     
     args = parser.parse_args()
-    client = CogniteClient(api_key=args.key, project=args.project)
+    client = CogniteClient(api_key=args.key, project=args.project, client_name="geir-bitcoin-extractor")
 
-    data = []
-    if args.file:
-    	data = get_cmc_from_file(args.file)
+    if args.ids:
+    	do_cmc_backfill(args.bitcoin_key, args.ids, int(args.start), int(args.end), client)
     else:
-    	data = download_cmc(args.bitcoin_key)
-    	save_cmc_to_file(data, 'coinmarketcap.last.json')
+	    data = []
+	    if args.file:
+	    	data = get_cmc_from_file(args.file)
+	    else:
+	    	data = download_cmc(args.bitcoin_key)
+	    	save_cmc_to_file(data, 'coinmarketcap.last.json')
 
-    update_datapoints(data, int(args.asset), client)
+	    update_datapoints(data, int(args.asset), client)
