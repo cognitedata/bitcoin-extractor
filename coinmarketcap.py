@@ -57,13 +57,17 @@ def update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, clie
 	except CogniteAPIError as e:
 		if e.code == 400:
 			return create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client)
+		logging.error('Unknown error while creating ts: ', e.code)
 
 def get_update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client):
 	try:
-		print(ext_id)
+		print('Trying to get ext_id: ', ext_id)
 		ts = client.time_series.retrieve(external_id=ext_id)
+		if ts == None:
+			return update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client)
 		return ts
 	except CogniteAPIError as e:
+		print('Got error code on retrieve: ', e.code)
 		if e.code == 400:
 			return update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client)
 		logging.error('Unknown error while retrieving ts')
