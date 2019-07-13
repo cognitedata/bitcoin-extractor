@@ -15,6 +15,7 @@ import os
 import time
 from cognite.client import CogniteClient
 from cognite.client.exceptions import CogniteAPIError
+from cognite.client.exceptions import CogniteNotFoundError
 from cognite.client.data_classes import TimeSeries
 from cognite.client.data_classes import TimeSeriesUpdate
 from cognite.client.data_classes import Asset
@@ -40,12 +41,10 @@ def download_cmc(apiKey):
 
 def create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client):
 	res = []
-	try:
-		res = client.assets.retrieve(external_id=asset_ext_id)
-	except CogniteAPIError as e:
-		if e.code == 400:
-			asset = Asset(external_id=asset_ext_id, name=symbol, parent_id=root, description=name)
-			res = client.assets.create(asset)
+	res = client.assets.retrieve(external_id=asset_ext_id)
+	if res == None:
+		asset = Asset(external_id=asset_ext_id, name=symbol, parent_id=root, description=name)
+		res = client.assets.create(asset)
 	print(res)
 	ts = client.time_series.create(TimeSeries(external_id=ext_id, name=name, unit='USD', asset_id=res.id, legacy_name=ext_id))
 	return ts
@@ -54,10 +53,8 @@ def update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, clie
 	try:
 		update = TimeSeriesUpdate(external_id=old_name).external_id.set(ext_id).name.set(name)
 		ts = client.time_series.update(update)
-	except CogniteAPIError as e:
-		if e.code == 400:
-			return create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client)
-		logging.error('Unknown error while creating ts: ', e.code)
+	except CogniteNotFoundError as e:
+		return create_asset_and_timeseries(ext_id, name, symbol, asset_ext_id, root, client)
 
 def get_update_or_create_ts(old_name, ext_id, name, symbol, asset_ext_id, root, client):
 	try:
